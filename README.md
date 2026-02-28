@@ -5,7 +5,7 @@ Python SDK for DistroMate `dm_api` native library.
 ## Install
 
 ```bash
-pip install dm-api
+pip install distromate-dm-api
 ```
 
 ## Quick Start (License)
