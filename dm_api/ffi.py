@@ -10,6 +10,8 @@ from .constants import DEFAULT_DLL_NAME, ENV_DM_API_PATH
 
 
 class DmApiFFI:
+    LICENSE_CALLBACK_TYPE = ctypes.CFUNCTYPE(None)
+
     def __init__(self, dll_path: Optional[str] = None) -> None:
         path = dll_path or os.environ.get(ENV_DM_API_PATH, DEFAULT_DLL_NAME)
         resolved = Path(path)
@@ -23,31 +25,35 @@ class DmApiFFI:
         self._init_signatures()
 
     def _init_signatures(self) -> None:
-        self.lib.DM_Connect.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
-        self.lib.DM_Close.argtypes = []
-        self.lib.DM_IsConnected.argtypes = []
-        self.lib.DM_GetVersion.argtypes = []
-        self.lib.DM_GetVersion.restype = ctypes.c_char_p
-        self.lib.DM_RestartAppIfNecessary.argtypes = []
         self.lib.DM_FreeString.argtypes = [ctypes.c_void_p]
+        self.lib.DM_FreeString.restype = None
+
         self.lib.DM_GetLastError.argtypes = []
         self.lib.DM_GetLastError.restype = ctypes.c_void_p
+
         self.lib.DM_CheckForUpdates.argtypes = [ctypes.c_char_p]
         self.lib.DM_CheckForUpdates.restype = ctypes.c_void_p
         self.lib.DM_DownloadUpdate.argtypes = [ctypes.c_char_p]
         self.lib.DM_DownloadUpdate.restype = ctypes.c_void_p
+        self.lib.DM_CancelUpdateDownload.argtypes = [ctypes.c_char_p]
+        self.lib.DM_CancelUpdateDownload.restype = ctypes.c_void_p
         self.lib.DM_GetUpdateState.argtypes = []
         self.lib.DM_GetUpdateState.restype = ctypes.c_void_p
+        self.lib.DM_GetPostUpdateInfo.argtypes = []
+        self.lib.DM_GetPostUpdateInfo.restype = ctypes.c_void_p
+        self.lib.DM_AckPostUpdateInfo.argtypes = [ctypes.c_char_p]
+        self.lib.DM_AckPostUpdateInfo.restype = ctypes.c_void_p
         self.lib.DM_WaitForUpdateStateChange.argtypes = [ctypes.c_uint64, ctypes.c_uint32]
         self.lib.DM_WaitForUpdateStateChange.restype = ctypes.c_void_p
         self.lib.DM_QuitAndInstall.argtypes = [ctypes.c_char_p]
         self.lib.DM_QuitAndInstall.restype = ctypes.c_int32
+
         self.lib.DM_JsonToCanonical.argtypes = [ctypes.c_char_p]
         self.lib.DM_JsonToCanonical.restype = ctypes.c_void_p
 
         self.lib.SetProductData.argtypes = [ctypes.c_char_p]
         self.lib.SetProductData.restype = ctypes.c_int32
-        self.lib.SetProductId.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
+        self.lib.SetProductId.argtypes = [ctypes.c_char_p]
         self.lib.SetProductId.restype = ctypes.c_int32
         self.lib.SetDataDirectory.argtypes = [ctypes.c_char_p]
         self.lib.SetDataDirectory.restype = ctypes.c_int32
@@ -58,14 +64,10 @@ class DmApiFFI:
 
         self.lib.SetLicenseKey.argtypes = [ctypes.c_char_p]
         self.lib.SetLicenseKey.restype = ctypes.c_int32
-        self.lib.SetActivationMetadata.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-        self.lib.SetActivationMetadata.restype = ctypes.c_int32
+        self.lib.SetLicenseCallback.argtypes = [self.LICENSE_CALLBACK_TYPE]
+        self.lib.SetLicenseCallback.restype = ctypes.c_int32
         self.lib.ActivateLicense.argtypes = []
         self.lib.ActivateLicense.restype = ctypes.c_int32
-        self.lib.ActivateLicenseOffline.argtypes = [ctypes.c_char_p]
-        self.lib.ActivateLicenseOffline.restype = ctypes.c_int32
-        self.lib.GenerateOfflineDeactivationRequest.argtypes = [ctypes.c_char_p]
-        self.lib.GenerateOfflineDeactivationRequest.restype = ctypes.c_int32
         self.lib.GetLastActivationError.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
         self.lib.GetLastActivationError.restype = ctypes.c_int32
 
@@ -100,8 +102,8 @@ class DmApiFFI:
         self.lib.GetActivationId.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
         self.lib.GetActivationId.restype = ctypes.c_int32
 
-        self.lib.GetLibraryVersion.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
-        self.lib.GetLibraryVersion.restype = ctypes.c_int32
+        self.lib.GetLibraryVersion.argtypes = []
+        self.lib.GetLibraryVersion.restype = ctypes.c_char_p
         self.lib.Reset.argtypes = []
         self.lib.Reset.restype = ctypes.c_int32
 

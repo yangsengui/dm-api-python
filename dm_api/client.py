@@ -1,20 +1,22 @@
 """High-level Python client for DM API."""
 
+import ctypes
 import json
 import os
-import ctypes
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .constants import (
-    DEFAULT_TIMEOUT_MS,
+    ACTIVATION_ERROR_NAMES,
     DEV_LICENSE_ERROR,
-    ENV_DM_API_PATH,
     ENV_DM_APP_ID,
-    ENV_DM_PIPE,
+    ENV_DM_LAUNCHER_ENDPOINT,
+    ENV_DM_LAUNCHER_TOKEN,
     ENV_DM_PUBLIC_KEY,
 )
 from .ffi import DmApiFFI
+
+JsonDict = Dict[str, Any]
 
 
 class DmApi:
@@ -23,20 +25,18 @@ class DmApi:
         public_key: Optional[str] = None,
         app_id: Optional[str] = None,
         dll_path: Optional[str] = None,
-        pipe_timeout: int = DEFAULT_TIMEOUT_MS,
     ) -> None:
         self.app_id = app_id or os.environ.get(ENV_DM_APP_ID)
         self.public_key = public_key or os.environ.get(ENV_DM_PUBLIC_KEY)
-        self.pipe_timeout = max(0, int(pipe_timeout))
-
         self._ffi = DmApiFFI(dll_path=dll_path)
+        self._license_callback_ref: Optional[Any] = None
 
     @staticmethod
     def should_skip_check(
         app_id: Optional[str] = None,
         public_key: Optional[str] = None,
     ) -> bool:
-        if os.environ.get(ENV_DM_PIPE) and os.environ.get(ENV_DM_API_PATH):
+        if os.environ.get(ENV_DM_LAUNCHER_ENDPOINT) and os.environ.get(ENV_DM_LAUNCHER_TOKEN):
             return False
 
         resolved_app_id = app_id or os.environ.get(ENV_DM_APP_ID)
@@ -52,49 +52,24 @@ class DmApi:
         )
         try:
             dev_pub_key = pubkey_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            raise RuntimeError(DEV_LICENSE_ERROR)
+        except Exception as exc:
+            raise RuntimeError(DEV_LICENSE_ERROR) from exc
 
         if not dev_pub_key or dev_pub_key != str(resolved_public_key).strip():
             raise RuntimeError(DEV_LICENSE_ERROR)
 
         return True
 
-    def get_version(self) -> str:
-        raw = self._ffi.lib.DM_GetVersion()
-        return raw.decode("utf-8") if raw else ""
-
     def get_last_error(self) -> Optional[str]:
         return self._ffi.ptr_to_string(self._ffi.lib.DM_GetLastError())
 
+    def get_activation_error_name(self, code: Optional[int]) -> Optional[str]:
+        if code is None:
+            return None
+        return ACTIVATION_ERROR_NAMES.get(code, f"UNKNOWN({code})")
+
     def _call_bool(self, func: Any, *args: Any) -> bool:
         return func(*args) == 0
-
-    def _resolve_pipe(self) -> Optional[str]:
-        return os.environ.get(ENV_DM_PIPE)
-
-    def _call_pipe_json(self, func: Any, *args: Any) -> Optional[Dict[str, Any]]:
-        pipe = self._resolve_pipe()
-        if not pipe:
-            return None
-        if self._ffi.lib.DM_Connect(pipe.encode("utf-8"), self.pipe_timeout) != 0:
-            return None
-        try:
-            resp = self._ffi.ptr_to_json(func(*args))
-            return resp.get("data") if isinstance(resp, dict) else None
-        finally:
-            self._ffi.lib.DM_Close()
-
-    def _call_pipe_bool(self, func: Any, *args: Any) -> bool:
-        pipe = self._resolve_pipe()
-        if not pipe:
-            return False
-        if self._ffi.lib.DM_Connect(pipe.encode("utf-8"), self.pipe_timeout) != 0:
-            return False
-        try:
-            return func(*args) == 1
-        finally:
-            self._ffi.lib.DM_Close()
 
     def _call_u32(self, func: Any) -> Optional[int]:
         value = ctypes.c_uint32(0)
@@ -102,30 +77,30 @@ class DmApi:
             return None
         return int(value.value)
 
-    def _call_string(self, func: Any, size: int = 512) -> Optional[str]:
-        buf = ctypes.create_string_buffer(size)
-        if func(buf, size) != 0:
+    def _call_out_string(self, func: Any, size: int = 512) -> Optional[str]:
+        safe_size = max(8, int(size))
+        buf = ctypes.create_string_buffer(safe_size)
+        if func(buf, safe_size) != 0:
             return None
         return buf.value.decode("utf-8")
 
-    def restart_app_if_necessary(self) -> bool:
-        return self._ffi.lib.DM_RestartAppIfNecessary() != 0
+    def _call_json(self, func: Any, *args: Any) -> Optional[JsonDict]:
+        return self._ffi.ptr_to_json(func(*args))
+
+    @staticmethod
+    def _encode_options(options: Optional[JsonDict]) -> Optional[bytes]:
+        if options is None:
+            return None
+        return json.dumps(options, separators=(",", ":")).encode("utf-8")
 
     def set_product_data(self, product_data: str) -> bool:
         return self._call_bool(self._ffi.lib.SetProductData, product_data.encode("utf-8"))
 
-    def set_product_id(self, product_id: str, flags: int = 0) -> bool:
-        return self._call_bool(
-            self._ffi.lib.SetProductId,
-            product_id.encode("utf-8"),
-            int(flags),
-        )
+    def set_product_id(self, product_id: str) -> bool:
+        return self._call_bool(self._ffi.lib.SetProductId, product_id.encode("utf-8"))
 
     def set_data_directory(self, directory_path: str) -> bool:
-        return self._call_bool(
-            self._ffi.lib.SetDataDirectory,
-            directory_path.encode("utf-8"),
-        )
+        return self._call_bool(self._ffi.lib.SetDataDirectory, directory_path.encode("utf-8"))
 
     def set_debug_mode(self, enable: bool) -> bool:
         return self._call_bool(self._ffi.lib.SetDebugMode, 1 if enable else 0)
@@ -139,32 +114,22 @@ class DmApi:
     def set_license_key(self, license_key: str) -> bool:
         return self._call_bool(self._ffi.lib.SetLicenseKey, license_key.encode("utf-8"))
 
-    def set_activation_metadata(self, key: str, value: str) -> bool:
-        return self._call_bool(
-            self._ffi.lib.SetActivationMetadata,
-            key.encode("utf-8"),
-            value.encode("utf-8"),
-        )
+    def set_license_callback(self, callback: Callable[[], None]) -> bool:
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+
+        c_callback = DmApiFFI.LICENSE_CALLBACK_TYPE(callback)
+        if self._ffi.lib.SetLicenseCallback(c_callback) != 0:
+            return False
+
+        self._license_callback_ref = c_callback
+        return True
 
     def activate_license(self) -> bool:
         return self._call_bool(self._ffi.lib.ActivateLicense)
 
-    def activate_license_offline(self, file_path: str) -> bool:
-        return self._call_bool(
-            self._ffi.lib.ActivateLicenseOffline,
-            file_path.encode("utf-8"),
-        )
-
-    def generate_offline_deactivation_request(self, file_path: str) -> bool:
-        return self._call_bool(
-            self._ffi.lib.GenerateOfflineDeactivationRequest,
-            file_path.encode("utf-8"),
-        )
-
     def get_last_activation_error(self) -> Optional[int]:
-        value = ctypes.c_uint32(0)
-        ok = self._ffi.lib.GetLastActivationError(ctypes.byref(value)) == 0
-        return int(value.value) if ok else None
+        return self._call_u32(self._ffi.lib.GetLastActivationError)
 
     def is_license_genuine(self) -> bool:
         return self._call_bool(self._ffi.lib.IsLicenseGenuine)
@@ -176,9 +141,10 @@ class DmApi:
         return self._call_u32(self._ffi.lib.GetServerSyncGracePeriodExpiryDate)
 
     def get_activation_mode(self, buffer_size: int = 64) -> Optional[Dict[str, str]]:
-        initial = ctypes.create_string_buffer(buffer_size)
-        current = ctypes.create_string_buffer(buffer_size)
-        code = self._ffi.lib.GetActivationMode(initial, buffer_size, current, buffer_size)
+        safe_size = max(8, int(buffer_size))
+        initial = ctypes.create_string_buffer(safe_size)
+        current = ctypes.create_string_buffer(safe_size)
+        code = self._ffi.lib.GetActivationMode(initial, safe_size, current, safe_size)
         if code != 0:
             return None
         return {
@@ -187,7 +153,7 @@ class DmApi:
         }
 
     def get_license_key(self, buffer_size: int = 256) -> Optional[str]:
-        return self._call_string(self._ffi.lib.GetLicenseKey, size=buffer_size)
+        return self._call_out_string(self._ffi.lib.GetLicenseKey, size=buffer_size)
 
     def get_license_expiry_date(self) -> Optional[int]:
         return self._call_u32(self._ffi.lib.GetLicenseExpiryDate)
@@ -205,42 +171,47 @@ class DmApi:
         return self._call_u32(self._ffi.lib.GetActivationLastSyncedDate)
 
     def get_activation_id(self, buffer_size: int = 256) -> Optional[str]:
-        return self._call_string(self._ffi.lib.GetActivationId, size=buffer_size)
-
-    def get_library_version(self, buffer_size: int = 32) -> Optional[str]:
-        return self._call_string(self._ffi.lib.GetLibraryVersion, size=buffer_size)
+        return self._call_out_string(self._ffi.lib.GetActivationId, size=buffer_size)
 
     def reset(self) -> bool:
         return self._call_bool(self._ffi.lib.Reset)
 
-    def check_for_updates(self, options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        req = json.dumps(options or {}).encode("utf-8")
-        return self._call_pipe_json(self._ffi.lib.DM_CheckForUpdates, req)
+    def check_for_updates(self, options: Optional[JsonDict] = None) -> Optional[JsonDict]:
+        return self._call_json(self._ffi.lib.DM_CheckForUpdates, self._encode_options(options))
 
-    def download_update(self, options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        req = json.dumps(options or {}).encode("utf-8")
-        return self._call_pipe_json(self._ffi.lib.DM_DownloadUpdate, req)
+    def download_update(self, options: Optional[JsonDict] = None) -> Optional[JsonDict]:
+        return self._call_json(self._ffi.lib.DM_DownloadUpdate, self._encode_options(options))
 
-    def get_update_state(self) -> Optional[Dict[str, Any]]:
-        return self._call_pipe_json(self._ffi.lib.DM_GetUpdateState)
+    def cancel_update_download(self, options: Optional[JsonDict] = None) -> Optional[JsonDict]:
+        return self._call_json(
+            self._ffi.lib.DM_CancelUpdateDownload,
+            self._encode_options(options),
+        )
+
+    def get_update_state(self) -> Optional[JsonDict]:
+        return self._call_json(self._ffi.lib.DM_GetUpdateState)
+
+    def get_post_update_info(self) -> Optional[JsonDict]:
+        return self._call_json(self._ffi.lib.DM_GetPostUpdateInfo)
+
+    def ack_post_update_info(self, options: Optional[JsonDict] = None) -> Optional[JsonDict]:
+        return self._call_json(self._ffi.lib.DM_AckPostUpdateInfo, self._encode_options(options))
 
     def wait_for_update_state_change(
         self,
         last_sequence: int,
         timeout_ms: int = 30000,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[JsonDict]:
         sequence = max(0, int(last_sequence))
         timeout = max(0, int(timeout_ms))
-        return self._call_pipe_json(
-            self._ffi.lib.DM_WaitForUpdateStateChange,
-            sequence,
-            timeout,
-        )
+        return self._call_json(self._ffi.lib.DM_WaitForUpdateStateChange, sequence, timeout)
 
-    def quit_and_install(self, options: Optional[Dict[str, Any]] = None) -> bool:
-        req = json.dumps(options or {}).encode("utf-8")
-        return self._call_pipe_bool(self._ffi.lib.DM_QuitAndInstall, req)
+    def quit_and_install(self, options: Optional[JsonDict] = None) -> int:
+        return int(self._ffi.lib.DM_QuitAndInstall(self._encode_options(options)))
 
-    def json_to_canonical(self, json_str: str) -> str:
-        canonical = self._ffi.json_to_canonical(json_str)
-        return canonical or ""
+    def get_library_version(self) -> str:
+        raw = self._ffi.lib.GetLibraryVersion()
+        return raw.decode("utf-8") if raw else ""
+
+    def json_to_canonical(self, json_str: str) -> Optional[str]:
+        return self._ffi.json_to_canonical(json_str)
